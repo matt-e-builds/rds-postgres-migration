@@ -1,12 +1,8 @@
 # RDS PostgreSQL Native Migration Runbook
 
-This runbook covers a near-zero-downtime migration using:
+The primary implementation guide for this repository is now in `README.md`.
 
-- `pg_dump --snapshot` for the baseline copy
-- native PostgreSQL logical replication for catch-up
-- a short write freeze for final cutover
-
-It does not use AWS DMS.
+This file remains as a detailed reference for supporting notes, SQL examples, validation examples, and background material.
 
 ## Start here
 
