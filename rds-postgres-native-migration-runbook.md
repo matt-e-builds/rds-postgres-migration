@@ -52,7 +52,7 @@ This sequence is intended to be followed from a local workstation from start to 
 
 1. Open a terminal in the folder containing the scripts.
 2. Install PostgreSQL client tools if they are not already installed.
-3. Create `migration.env` with the source and target connection details.
+3. Open `migration.env` and replace every placeholder value with the real source and target connection details.
 4. Load the environment variables into the current shell.
 5. Run the precheck script and confirm source and target connectivity.
 6. Run the primary-key check and review the output.
@@ -71,28 +71,7 @@ cd /path/to/this/folder
 
 brew install libpq
 export PATH="/opt/homebrew/opt/libpq/bin:$PATH"
-
-cat > migration.env <<'EOF'
-export SRC_HOST="source.xxxxx.us-east-1.rds.amazonaws.com"
-export SRC_PORT="5432"
-export SRC_DB="appdb"
-export SRC_USER="migration_user"
-export SRC_PASSWORD="source_password"
-
-export TGT_HOST="target.xxxxx.us-east-1.rds.amazonaws.com"
-export TGT_PORT="5432"
-export TGT_DB="appdb"
-export TGT_USER="migration_user"
-export TGT_PASSWORD="target_password"
-
-export PUB_NAME="migration_pub"
-export SUB_NAME="migration_sub"
-export SLOT_NAME="migration_slot"
-
-export DUMP_DIR="$PWD/migration-artifacts"
-export VALIDATION_TABLES="public.table1 public.table2"
-EOF
-
+# Update migration.env with real values before continuing
 source ./migration.env
 
 # Run the main migration script with the required subcommands
@@ -223,14 +202,17 @@ Then secure it:
 chmod 600 ~/.pgpass
 ```
 
-The following helper scripts are included in this directory:
+The following files are included in this directory:
 
 ```bash
+cat ./migration.env
 bash ./rds-postgres-native-migration.sh help
 bash ./rds-postgres-native-snapshot-helper.sh --help
 ```
 
-An example `migration.env` template is shown below:
+The checked-in `migration.env` file is a template. Replace every placeholder value before running any command.
+
+Template contents:
 
 ```bash
 export SRC_HOST="source.xxxxx.us-east-1.rds.amazonaws.com"
