@@ -55,8 +55,8 @@ The workstation used for the migration requires PostgreSQL client tools:
 Example installation on macOS with Homebrew:
 
 ```bash
-brew install libpq
-export PATH="/opt/homebrew/opt/libpq/bin:$PATH"
+brew install postgresql@15
+export PATH="/opt/homebrew/opt/postgresql@15/bin:/opt/homebrew/opt/libpq/bin:$PATH"
 ```
 
 Verification:
@@ -70,6 +70,7 @@ pg_restore --version
 Expected result:
 
 - each command returns a PostgreSQL version
+- the major version should match the RDS PostgreSQL major version
 
 ## Quick path
 
@@ -96,14 +97,15 @@ Commands:
 ```bash
 cd /path/to/this/folder
 
-brew install libpq
-export PATH="/opt/homebrew/opt/libpq/bin:$PATH"
+brew install postgresql@15
+export PATH="/opt/homebrew/opt/postgresql@15/bin:/opt/homebrew/opt/libpq/bin:$PATH"
 cp ./migration.env.example ./migration.env
 # Update migration.env with real values before continuing
 source ./migration.env
 
 # Run the main migration script with the required subcommands
 bash ./rds-postgres-native-migration.sh precheck
+bash ./rds-postgres-native-migration.sh verify-replication-settings
 bash ./rds-postgres-native-migration.sh check-pks
 bash ./rds-postgres-native-migration.sh dump-schema
 bash ./rds-postgres-native-migration.sh restore-schema
@@ -124,6 +126,7 @@ Cutover actions:
 2. Run `bash ./rds-postgres-native-migration.sh monitor` until replication lag is fully drained.
 3. Redirect application connections to the target database.
 4. Re-enable writes on the target database.
+5. Run `bash ./rds-postgres-native-migration.sh session-check` to confirm client sessions have moved to the target.
 
 Final verification:
 
@@ -139,12 +142,15 @@ The migration workflow can be largely automated with shell scripts.
 Automatable steps include:
 
 - prechecks
+- client version verification
+- source logical replication settings verification
 - schema export and restore
 - publication creation
 - baseline export with `pg_dump --snapshot`
 - baseline restore with `pg_restore`
 - subscription creation with `copy_data = false`
 - replication monitoring
+- source/target session comparison
 - validation queries
 - row-count comparison
 - ordered checksum comparison for selected tables
@@ -190,11 +196,17 @@ export SRC_HOST="source.xxxxx.us-east-1.rds.amazonaws.com"
 export SRC_PORT="5432"
 export SRC_DB="appdb"
 export SRC_USER="migration_user"
+export SRC_PASSWORD="source_password"
+export SRC_SSLMODE="require"
+export SRC_SSLROOTCERT=""
 
 export TGT_HOST="target.xxxxx.us-east-1.rds.amazonaws.com"
 export TGT_PORT="5432"
 export TGT_DB="appdb"
 export TGT_USER="migration_user"
+export TGT_PASSWORD="target_password"
+export TGT_SSLMODE="require"
+export TGT_SSLROOTCERT=""
 
 export PUB_NAME="migration_pub"
 export SUB_NAME="migration_sub"
@@ -217,10 +229,10 @@ You need:
 - database credentials for source and target
 - either `PGPASSWORD` set per command/session or a `.pgpass` file
 
-If the PostgreSQL client tools were installed through Homebrew `libpq`, add the following to the shell session before running the scripts:
+For this tested migration path against PostgreSQL 15 RDS instances, use PostgreSQL 15 client tools. If the tools were installed through Homebrew, add the following to the shell session before running the scripts:
 
 ```bash
-export PATH="/opt/homebrew/opt/libpq/bin:$PATH"
+export PATH="/opt/homebrew/opt/postgresql@15/bin:/opt/homebrew/opt/libpq/bin:$PATH"
 ```
 
 You do not need AWS CLI for the database dump and restore commands. `pg_dump`, `pg_restore`, and `psql` connect directly to the RDS hostname and port.
@@ -249,6 +261,14 @@ bash ./rds-postgres-verification.sh help
 
 `migration.env.example` is the checked-in template. Copy it to `migration.env`, replace every placeholder value, and keep `migration.env` local. `VALIDATION_TABLES` can remain empty until the final verification step.
 
+If the target requires certificate validation, download the RDS trust bundle and set the target SSL variables accordingly:
+
+```bash
+curl -o global-bundle.pem https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
+export TGT_SSLMODE="verify-full"
+export TGT_SSLROOTCERT="$PWD/global-bundle.pem"
+```
+
 Template contents:
 
 ```bash
@@ -257,12 +277,16 @@ export SRC_PORT="5432"
 export SRC_DB="appdb"
 export SRC_USER="migration_user"
 export SRC_PASSWORD="source_password"
+export SRC_SSLMODE="require"
+export SRC_SSLROOTCERT=""
 
 export TGT_HOST="target.xxxxx.us-east-1.rds.amazonaws.com"
 export TGT_PORT="5432"
 export TGT_DB="appdb"
 export TGT_USER="migration_user"
 export TGT_PASSWORD="target_password"
+export TGT_SSLMODE="require"
+export TGT_SSLROOTCERT=""
 
 export PUB_NAME="migration_pub"
 export SUB_NAME="migration_sub"
@@ -281,6 +305,12 @@ SHOW rds.logical_replication;
 SHOW wal_level;
 SHOW max_replication_slots;
 SHOW max_wal_senders;
+```
+
+The same verification can be run through the script:
+
+```bash
+bash ./rds-postgres-native-migration.sh verify-replication-settings
 ```
 
 Confirm primary keys exist on replicated tables:
@@ -453,6 +483,19 @@ WHERE slot_name = 'migration_slot';
 
 If the slot is not consumed, WAL retention grows on source.
 
+Connection retry behavior:
+
+- `precheck`, `monitor`, and `session-check` retry connectivity automatically
+- default retries: `3`
+- default sleep between retries: `2` seconds
+
+Optional overrides:
+
+```bash
+export CONNECT_RETRIES="5"
+export CONNECT_RETRY_SLEEP="3"
+```
+
 ## 8. Validation before cutover
 
 Row counts for critical tables:
@@ -501,9 +544,10 @@ This provides stronger verification than row counts alone, but it can be expensi
 
 1. Put the application in read-only mode or stop writes.
 2. Wait for subscription lag to drain.
-3. If required, run the verification script after cutover.
-4. Point the application to target.
-5. Resume writes on target.
+3. Point the application to target.
+4. Resume writes on target.
+5. Run `bash ./rds-postgres-native-migration.sh session-check`.
+6. Confirm application sessions have drained from source and appear on target.
 
 The write freeze is generally short when replication lag is already near zero before cutover.
 
@@ -542,7 +586,7 @@ DROP PUBLICATION migration_pub;
 
 `rds-postgres-native-migration.sh`
 
-- phase-based helper for precheck, schema, publication, restore, subscription, monitoring, and validation
+- phase-based helper for precheck, replication settings verification, schema, publication, restore, subscription, monitoring, session comparison, and validation
 
 `rds-postgres-native-snapshot-helper.sh`
 
@@ -608,3 +652,13 @@ echo "Freeze writes, validate lag=0, and perform cutover"
 Most of the migration workflow can be automated with shell scripts, including schema export and restore, publication creation, baseline export, baseline restore, subscription creation, replication monitoring, and validation queries.
 
 For production execution, the cutover remains a controlled operational step. The application write freeze, final replication verification, validation review, and endpoint switchover require explicit operator approval so the implementation team can confirm replication state and make a deliberate go/no-go decision.
+
+## Test findings
+
+The migration test surfaced the following operational requirements:
+
+- PostgreSQL 15 client tools should be used for PostgreSQL 15 RDS instances
+- PostgreSQL 18 client tools generated schema SQL that did not restore cleanly to PostgreSQL 15
+- replication caught up correctly through native logical replication after baseline load
+- table count and checksum verification succeeded for the selected tables
+- session checks should be used after cutover to confirm application connections have moved from source to target

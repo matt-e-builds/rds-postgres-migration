@@ -9,6 +9,8 @@ Usage:
 Commands:
   help                 Show this help
   precheck             Verify required env vars and local tools
+  verify-replication-settings
+                       Verify source logical replication settings
   check-pks            List user tables without primary keys on source
   dump-schema          Dump schema from source to $DUMP_DIR/schema.sql
   restore-schema       Restore $DUMP_DIR/schema.sql to target
@@ -17,6 +19,7 @@ Commands:
   restore-baseline     Restore baseline.dump to target
   create-subscription  Create target subscription with copy_data=false
   monitor              Show slot/subscription state
+  session-check        Compare active client sessions on source and target
   validate             Run basic validation queries
 
 Required env vars:
@@ -36,6 +39,9 @@ Notes:
 EOF
 }
 
+CONNECT_RETRIES="${CONNECT_RETRIES:-3}"
+CONNECT_RETRY_SLEEP="${CONNECT_RETRY_SLEEP:-2}"
+
 require_tools() {
   local missing=0
   for bin in psql pg_dump pg_restore; do
@@ -45,6 +51,25 @@ require_tools() {
     fi
   done
   if [[ "$missing" -ne 0 ]]; then
+    exit 1
+  fi
+}
+
+major_version() {
+  "$1" --version | awk '{print $3}' | cut -d. -f1
+}
+
+assert_supported_client_major() {
+  local expected="15"
+  local psql_major dump_major restore_major
+  psql_major="$(major_version psql)"
+  dump_major="$(major_version pg_dump)"
+  restore_major="$(major_version pg_restore)"
+  if [[ "$psql_major" != "$expected" || "$dump_major" != "$expected" || "$restore_major" != "$expected" ]]; then
+    echo "PostgreSQL client major version mismatch." >&2
+    echo "Expected psql/pg_dump/pg_restore major version: $expected" >&2
+    echo "Found: psql=$psql_major pg_dump=$dump_major pg_restore=$restore_major" >&2
+    echo "Use PostgreSQL $expected client tools before running this migration." >&2
     exit 1
   fi
 }
@@ -62,9 +87,26 @@ require_env() {
   fi
 }
 
+retry_cmd() {
+  local attempts="$1"
+  shift
+  local try=1
+  while true; do
+    if "$@"; then
+      return 0
+    fi
+    if [[ "$try" -ge "$attempts" ]]; then
+      return 1
+    fi
+    sleep "$CONNECT_RETRY_SLEEP"
+    try=$((try + 1))
+  done
+}
+
 src_psql() {
   PGPASSWORD="${SRC_PASSWORD:-${PGPASSWORD:-}}" \
   PGSSLMODE="${SRC_SSLMODE:-prefer}" \
+  PGSSLROOTCERT="${SRC_SSLROOTCERT:-}" \
     psql -v ON_ERROR_STOP=1 \
       -h "$SRC_HOST" -p "$SRC_PORT" -U "$SRC_USER" -d "$SRC_DB" "$@"
 }
@@ -72,6 +114,7 @@ src_psql() {
 tgt_psql() {
   PGPASSWORD="${TGT_PASSWORD:-${PGPASSWORD:-}}" \
   PGSSLMODE="${TGT_SSLMODE:-prefer}" \
+  PGSSLROOTCERT="${TGT_SSLROOTCERT:-}" \
     psql -v ON_ERROR_STOP=1 \
       -h "$TGT_HOST" -p "$TGT_PORT" -U "$TGT_USER" -d "$TGT_DB" "$@"
 }
@@ -79,12 +122,14 @@ tgt_psql() {
 src_dump() {
   PGPASSWORD="${SRC_PASSWORD:-${PGPASSWORD:-}}" \
   PGSSLMODE="${SRC_SSLMODE:-prefer}" \
+  PGSSLROOTCERT="${SRC_SSLROOTCERT:-}" \
     pg_dump -h "$SRC_HOST" -p "$SRC_PORT" -U "$SRC_USER" -d "$SRC_DB" "$@"
 }
 
 tgt_restore() {
   PGPASSWORD="${TGT_PASSWORD:-${PGPASSWORD:-}}" \
   PGSSLMODE="${TGT_SSLMODE:-prefer}" \
+  PGSSLROOTCERT="${TGT_SSLROOTCERT:-}" \
     pg_restore -h "$TGT_HOST" -p "$TGT_PORT" -U "$TGT_USER" -d "$TGT_DB" "$@"
 }
 
@@ -98,18 +143,33 @@ ensure_dump_dir() {
 
 command_precheck() {
   require_tools
+  assert_supported_client_major
   require_env SRC_HOST SRC_PORT SRC_DB SRC_USER TGT_HOST TGT_PORT TGT_DB TGT_USER PUB_NAME SUB_NAME SLOT_NAME DUMP_DIR
   ensure_dump_dir
   echo "Tools present."
   echo "Artifacts dir: $DUMP_DIR"
+  echo "PostgreSQL client major version: $(major_version psql)"
   echo "Checking source connectivity..."
-  src_psql -c "SELECT version();"
+  retry_cmd "$CONNECT_RETRIES" src_psql -c "SELECT version();"
   echo "Checking target connectivity..."
-  tgt_psql -c "SELECT version();"
+  retry_cmd "$CONNECT_RETRIES" tgt_psql -c "SELECT version();"
+}
+
+command_verify_replication_settings() {
+  require_tools
+  assert_supported_client_major
+  require_env SRC_HOST SRC_PORT SRC_DB SRC_USER
+  src_psql <<'SQL'
+SHOW rds.logical_replication;
+SHOW wal_level;
+SHOW max_replication_slots;
+SHOW max_wal_senders;
+SQL
 }
 
 command_check_pks() {
   require_tools
+  assert_supported_client_major
   require_env SRC_HOST SRC_PORT SRC_DB SRC_USER
   src_psql <<'SQL'
 SELECT n.nspname AS schema_name,
@@ -128,6 +188,7 @@ SQL
 
 command_dump_schema() {
   require_tools
+  assert_supported_client_major
   require_env SRC_HOST SRC_PORT SRC_DB SRC_USER DUMP_DIR
   ensure_dump_dir
   src_dump --schema-only --no-owner --no-privileges -f "$DUMP_DIR/schema.sql"
@@ -136,6 +197,7 @@ command_dump_schema() {
 
 command_restore_schema() {
   require_tools
+  assert_supported_client_major
   require_env TGT_HOST TGT_PORT TGT_DB TGT_USER DUMP_DIR
   [[ -f "$DUMP_DIR/schema.sql" ]] || { echo "Missing $DUMP_DIR/schema.sql" >&2; exit 1; }
   tgt_psql -f "$DUMP_DIR/schema.sql"
@@ -143,6 +205,7 @@ command_restore_schema() {
 
 command_create_publication() {
   require_tools
+  assert_supported_client_major
   require_env SRC_HOST SRC_PORT SRC_DB SRC_USER PUB_NAME
   local sql
   if [[ -n "${PUBLICATION_TABLES:-}" ]]; then
@@ -155,6 +218,7 @@ command_create_publication() {
 
 command_dump_baseline() {
   require_tools
+  assert_supported_client_major
   require_env SRC_HOST SRC_PORT SRC_DB SRC_USER DUMP_DIR SNAPSHOT_NAME
   ensure_dump_dir
   src_dump \
@@ -169,6 +233,7 @@ command_dump_baseline() {
 
 command_restore_baseline() {
   require_tools
+  assert_supported_client_major
   require_env TGT_HOST TGT_PORT TGT_DB TGT_USER DUMP_DIR
   [[ -f "$DUMP_DIR/baseline.dump" ]] || { echo "Missing $DUMP_DIR/baseline.dump" >&2; exit 1; }
   tgt_restore --data-only --no-owner --no-privileges "$DUMP_DIR/baseline.dump"
@@ -176,6 +241,7 @@ command_restore_baseline() {
 
 command_create_subscription() {
   require_tools
+  assert_supported_client_major
   require_env SRC_HOST SRC_PORT SRC_DB SRC_USER SRC_PASSWORD TGT_HOST TGT_PORT TGT_DB TGT_USER SUB_NAME PUB_NAME SLOT_NAME
   local conn
   conn="host=$(sql_escape_literal "$SRC_HOST") port=$(sql_escape_literal "$SRC_PORT") dbname=$(sql_escape_literal "$SRC_DB") user=$(sql_escape_literal "$SRC_USER") password=$(sql_escape_literal "$SRC_PASSWORD") sslmode=$(sql_escape_literal "${SRC_SSLMODE:-prefer}")"
@@ -194,16 +260,29 @@ SQL
 
 command_monitor() {
   require_tools
+  assert_supported_client_major
   require_env SRC_HOST SRC_PORT SRC_DB SRC_USER SLOT_NAME TGT_HOST TGT_PORT TGT_DB TGT_USER
   echo "Source slot state:"
-  src_psql -c "SELECT slot_name, plugin, slot_type, active, restart_lsn, confirmed_flush_lsn FROM pg_replication_slots WHERE slot_name = '$SLOT_NAME';"
+  retry_cmd "$CONNECT_RETRIES" src_psql -c "SELECT slot_name, plugin, slot_type, active, restart_lsn, confirmed_flush_lsn FROM pg_replication_slots WHERE slot_name = '$SLOT_NAME';"
   echo
   echo "Target subscription state:"
-  tgt_psql -c "SELECT subname, pid, relid, received_lsn, latest_end_lsn, latest_end_time FROM pg_stat_subscription;"
+  retry_cmd "$CONNECT_RETRIES" tgt_psql -c "SELECT subname, pid, relid, received_lsn, latest_end_lsn, latest_end_time FROM pg_stat_subscription;"
+}
+
+command_session_check() {
+  require_tools
+  assert_supported_client_major
+  require_env SRC_HOST SRC_PORT SRC_DB SRC_USER TGT_HOST TGT_PORT TGT_DB TGT_USER
+  echo "Source client sessions:"
+  retry_cmd "$CONNECT_RETRIES" src_psql -c "SELECT usename, application_name, client_addr, state, count(*) FROM pg_stat_activity WHERE pid <> pg_backend_pid() GROUP BY usename, application_name, client_addr, state ORDER BY count(*) DESC, usename, application_name;"
+  echo
+  echo "Target client sessions:"
+  retry_cmd "$CONNECT_RETRIES" tgt_psql -c "SELECT usename, application_name, client_addr, state, count(*) FROM pg_stat_activity WHERE pid <> pg_backend_pid() GROUP BY usename, application_name, client_addr, state ORDER BY count(*) DESC, usename, application_name;"
 }
 
 command_validate() {
   require_tools
+  assert_supported_client_major
   require_env SRC_HOST SRC_PORT SRC_DB SRC_USER TGT_HOST TGT_PORT TGT_DB TGT_USER
   if [[ -z "${VALIDATION_TABLES:-}" ]]; then
     echo "Set VALIDATION_TABLES to a space-separated list, for example: public.table1 public.table2" >&2
@@ -222,6 +301,7 @@ main() {
   case "$cmd" in
     help|-h|--help) usage ;;
     precheck) command_precheck ;;
+    verify-replication-settings) command_verify_replication_settings ;;
     check-pks) command_check_pks ;;
     dump-schema) command_dump_schema ;;
     restore-schema) command_restore_schema ;;
@@ -230,6 +310,7 @@ main() {
     restore-baseline) command_restore_baseline ;;
     create-subscription) command_create_subscription ;;
     monitor) command_monitor ;;
+    session-check) command_session_check ;;
     validate) command_validate ;;
     *) echo "Unknown command: $cmd" >&2; usage; exit 1 ;;
   esac
