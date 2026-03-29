@@ -62,7 +62,8 @@ This sequence is intended to be followed from a local workstation from start to 
 10. Restore the baseline dump to target.
 11. Create the subscription on target.
 12. Monitor replication until caught up.
-13. Perform cutover during a controlled change window.
+13. Run verification checks.
+14. Perform cutover during a controlled change window.
 
 Commands:
 
@@ -88,13 +89,14 @@ bash ./rds-postgres-native-snapshot-helper.sh
 bash ./rds-postgres-native-migration.sh restore-baseline
 bash ./rds-postgres-native-migration.sh create-subscription
 bash ./rds-postgres-native-migration.sh monitor
+bash ./rds-postgres-verification.sh all
 ```
 
 Cutover actions:
 
 1. Place the application in read-only mode or stop writes to the source database.
 2. Run `bash ./rds-postgres-native-migration.sh monitor` until replication lag is fully drained.
-3. Run the required validation queries.
+3. Run `bash ./rds-postgres-verification.sh all`.
 4. Redirect application connections to the target database.
 5. Re-enable writes on the target database.
 
@@ -112,6 +114,8 @@ Automatable steps include:
 - subscription creation with `copy_data = false`
 - replication monitoring
 - validation queries
+- row-count comparison
+- ordered checksum comparison for selected tables
 
 The production cutover remains a controlled operational activity.
 
@@ -208,6 +212,7 @@ The following files are included in this directory:
 cat ./migration.env
 bash ./rds-postgres-native-migration.sh help
 bash ./rds-postgres-native-snapshot-helper.sh --help
+bash ./rds-postgres-verification.sh help
 ```
 
 The checked-in `migration.env` file is a template. Replace every placeholder value before running any command.
@@ -442,6 +447,24 @@ SELECT setval(
 );
 ```
 
+The verification script can run the row-count comparison and checksum comparison automatically for the tables listed in `VALIDATION_TABLES`:
+
+```bash
+bash ./rds-postgres-verification.sh counts
+bash ./rds-postgres-verification.sh checksum
+bash ./rds-postgres-verification.sh all
+```
+
+The checksum routine:
+
+- requires each validation table to have a primary key
+- orders rows by primary key
+- converts each row to canonical JSON text
+- calculates a SHA-256 digest of the ordered stream on source and target
+- compares the resulting digest values
+
+This provides stronger verification than row counts alone, but it can be expensive on large tables.
+
 ## 9. Cutover
 
 1. Put the application in read-only mode or stop writes.
@@ -492,6 +515,10 @@ DROP PUBLICATION migration_pub;
 `rds-postgres-native-snapshot-helper.sh`
 
 - helper for the consistency-sensitive part: create slot, export snapshot, run baseline dump, then release the transaction
+
+`rds-postgres-verification.sh`
+
+- helper for row-count and checksum verification on selected tables before cutover
 
 ## Scriptable skeleton
 
