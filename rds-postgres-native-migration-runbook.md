@@ -17,7 +17,32 @@ Before running any script, confirm the following:
 3. A database username and password are available for both source and target.
 4. The source RDS parameter group has `rds.logical_replication=1`.
 5. The source and target PostgreSQL versions are compatible for native logical replication.
-6. The implementation team has identified the tables to validate after the baseline load and before cutover.
+6. The implementation team can identify business-critical tables for the final verification step.
+
+## Enable logical replication on the source RDS instance
+
+Complete this on the source RDS for PostgreSQL instance before running the migration scripts:
+
+1. Open the AWS RDS console.
+2. Go to `Parameter groups`.
+3. Create a custom DB parameter group for the correct PostgreSQL engine family if one does not already exist.
+4. Edit the custom parameter group and set `rds.logical_replication` to `1`.
+5. Associate that custom parameter group with the source RDS instance.
+6. Reboot the source RDS instance so the static parameter change takes effect.
+7. After the reboot, connect to the source database and verify:
+
+```sql
+SHOW rds.logical_replication;
+SHOW wal_level;
+SHOW max_replication_slots;
+SHOW max_wal_senders;
+```
+
+Expected result:
+
+- `rds.logical_replication` returns `on`
+- `wal_level` is suitable for logical replication
+- replication slot and WAL sender settings are nonzero
 
 ## Workstation prerequisites
 
@@ -52,18 +77,19 @@ This sequence is intended to be followed from a local workstation from start to 
 
 1. Open a terminal in the folder containing the scripts.
 2. Install PostgreSQL client tools if they are not already installed.
-3. Open `migration.env` and replace every placeholder value with the real source and target connection details.
-4. Load the environment variables into the current shell.
-5. Run the precheck script and confirm source and target connectivity.
-6. Run the primary-key check and review the output.
-7. Dump the schema from source and restore it to target.
-8. Create the publication on the source database.
-9. Run the snapshot helper to create the logical replication slot and baseline dump.
-10. Restore the baseline dump to target.
-11. Create the subscription on target.
-12. Monitor replication until caught up.
-13. Run verification checks.
+3. Copy `migration.env.example` to `migration.env`.
+4. Open `migration.env` and replace every placeholder value with the real source and target connection details.
+5. Load the environment variables into the current shell.
+6. Run the precheck script and confirm source and target connectivity.
+7. Run the primary-key check and review the output.
+8. Dump the schema from source and restore it to target.
+9. Create the publication on the source database.
+10. Run the snapshot helper to create the logical replication slot and baseline dump.
+11. Restore the baseline dump to target.
+12. Create the subscription on target.
+13. Monitor replication until caught up.
 14. Perform cutover during a controlled change window.
+15. Run the verification script as the final validation step.
 
 Commands:
 
@@ -72,6 +98,7 @@ cd /path/to/this/folder
 
 brew install libpq
 export PATH="/opt/homebrew/opt/libpq/bin:$PATH"
+cp ./migration.env.example ./migration.env
 # Update migration.env with real values before continuing
 source ./migration.env
 
@@ -89,16 +116,21 @@ bash ./rds-postgres-native-snapshot-helper.sh
 bash ./rds-postgres-native-migration.sh restore-baseline
 bash ./rds-postgres-native-migration.sh create-subscription
 bash ./rds-postgres-native-migration.sh monitor
-bash ./rds-postgres-verification.sh all
 ```
 
 Cutover actions:
 
 1. Place the application in read-only mode or stop writes to the source database.
 2. Run `bash ./rds-postgres-native-migration.sh monitor` until replication lag is fully drained.
+3. Redirect application connections to the target database.
+4. Re-enable writes on the target database.
+
+Final verification:
+
+1. Update `VALIDATION_TABLES` in `migration.env` with the business-critical tables that must be verified.
+2. Run `source ./migration.env`.
 3. Run `bash ./rds-postgres-verification.sh all`.
-4. Redirect application connections to the target database.
-5. Re-enable writes on the target database.
+4. Review the row-count and checksum results.
 
 ## Automation scope
 
@@ -209,13 +241,13 @@ chmod 600 ~/.pgpass
 The following files are included in this directory:
 
 ```bash
-cat ./migration.env
+cat ./migration.env.example
 bash ./rds-postgres-native-migration.sh help
 bash ./rds-postgres-native-snapshot-helper.sh --help
 bash ./rds-postgres-verification.sh help
 ```
 
-The checked-in `migration.env` file is a template. Replace every placeholder value before running any command.
+`migration.env.example` is the checked-in template. Copy it to `migration.env`, replace every placeholder value, and keep `migration.env` local. `VALIDATION_TABLES` can remain empty until the final verification step.
 
 Template contents:
 
@@ -237,7 +269,7 @@ export SUB_NAME="migration_sub"
 export SLOT_NAME="migration_slot"
 
 export DUMP_DIR="$PWD/migration-artifacts"
-export VALIDATION_TABLES="public.table1 public.table2"
+export VALIDATION_TABLES=""
 ```
 
 ## 1. Prepare source
@@ -447,7 +479,7 @@ SELECT setval(
 );
 ```
 
-The verification script can run the row-count comparison and checksum comparison automatically for the tables listed in `VALIDATION_TABLES`:
+The verification script is intended to run separately at the end of the migration. It performs row-count comparison and checksum comparison for the tables listed in `VALIDATION_TABLES`:
 
 ```bash
 bash ./rds-postgres-verification.sh counts
@@ -469,7 +501,7 @@ This provides stronger verification than row counts alone, but it can be expensi
 
 1. Put the application in read-only mode or stop writes.
 2. Wait for subscription lag to drain.
-3. Re-run critical validation queries.
+3. If required, run the verification script after cutover.
 4. Point the application to target.
 5. Resume writes on target.
 

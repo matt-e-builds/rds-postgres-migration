@@ -57,12 +57,14 @@ require_env() {
 
 src_psql() {
   PGPASSWORD="${SRC_PASSWORD:-${PGPASSWORD:-}}" \
+  PGSSLMODE="${SRC_SSLMODE:-prefer}" \
     psql -X -A -t -q -v ON_ERROR_STOP=1 \
       -h "$SRC_HOST" -p "$SRC_PORT" -U "$SRC_USER" -d "$SRC_DB" "$@"
 }
 
 tgt_psql() {
   PGPASSWORD="${TGT_PASSWORD:-${PGPASSWORD:-}}" \
+  PGSSLMODE="${TGT_SSLMODE:-prefer}" \
     psql -X -A -t -q -v ON_ERROR_STOP=1 \
       -h "$TGT_HOST" -p "$TGT_PORT" -U "$TGT_USER" -d "$TGT_DB" "$@"
 }
@@ -133,6 +135,7 @@ table_checksum() {
   rel_q="$(sql_ident "$rel")"
 
   PGPASSWORD="$password" \
+  PGSSLMODE="${9:-prefer}" \
     psql -X -A -t -q -v ON_ERROR_STOP=1 \
       -h "$host" -p "$port" -U "$user" -d "$db" \
       -c "COPY (SELECT row_to_json(t)::text FROM (SELECT * FROM ${schema_q}.${rel_q} ORDER BY ${order_expr}) AS t) TO STDOUT;" \
@@ -149,8 +152,8 @@ compare_checksums() {
       echo "CHECKSUM FAIL  $table    no primary key found"
       return 1
     fi
-    src_hash="$(table_checksum "$SRC_HOST" "$SRC_PORT" "$SRC_DB" "$SRC_USER" "$SRC_PASSWORD" "$schema" "$rel" "$order_expr")"
-    tgt_hash="$(table_checksum "$TGT_HOST" "$TGT_PORT" "$TGT_DB" "$TGT_USER" "$TGT_PASSWORD" "$schema" "$rel" "$order_expr")"
+    src_hash="$(table_checksum "$SRC_HOST" "$SRC_PORT" "$SRC_DB" "$SRC_USER" "$SRC_PASSWORD" "$schema" "$rel" "$order_expr" "${SRC_SSLMODE:-prefer}")"
+    tgt_hash="$(table_checksum "$TGT_HOST" "$TGT_PORT" "$TGT_DB" "$TGT_USER" "$TGT_PASSWORD" "$schema" "$rel" "$order_expr" "${TGT_SSLMODE:-prefer}")"
     if [[ "$src_hash" == "$tgt_hash" ]]; then
       echo "CHECKSUM OK    $table    $src_hash"
     else

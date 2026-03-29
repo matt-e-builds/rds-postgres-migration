@@ -87,6 +87,7 @@ main() {
 
   echo "Opening source session and preparing consistent snapshot..."
   PGPASSWORD="$SRC_PASSWORD" \
+  PGSSLMODE="${SRC_SSLMODE:-prefer}" \
     psql -X -A -t -q -v ON_ERROR_STOP=1 \
       -h "$SRC_HOST" -p "$SRC_PORT" -U "$SRC_USER" -d "$SRC_DB" \
       < "$FIFO_PATH" > "$logfile" 2>&1 &
@@ -124,6 +125,7 @@ main() {
   echo "Starting baseline dump to $dumpfile"
 
   PGPASSWORD="$SRC_PASSWORD" \
+  PGSSLMODE="${SRC_SSLMODE:-prefer}" \
     pg_dump \
       -h "$SRC_HOST" -p "$SRC_PORT" -U "$SRC_USER" -d "$SRC_DB" \
       --data-only \

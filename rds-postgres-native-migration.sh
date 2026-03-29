@@ -64,23 +64,27 @@ require_env() {
 
 src_psql() {
   PGPASSWORD="${SRC_PASSWORD:-${PGPASSWORD:-}}" \
+  PGSSLMODE="${SRC_SSLMODE:-prefer}" \
     psql -v ON_ERROR_STOP=1 \
       -h "$SRC_HOST" -p "$SRC_PORT" -U "$SRC_USER" -d "$SRC_DB" "$@"
 }
 
 tgt_psql() {
   PGPASSWORD="${TGT_PASSWORD:-${PGPASSWORD:-}}" \
+  PGSSLMODE="${TGT_SSLMODE:-prefer}" \
     psql -v ON_ERROR_STOP=1 \
       -h "$TGT_HOST" -p "$TGT_PORT" -U "$TGT_USER" -d "$TGT_DB" "$@"
 }
 
 src_dump() {
   PGPASSWORD="${SRC_PASSWORD:-${PGPASSWORD:-}}" \
+  PGSSLMODE="${SRC_SSLMODE:-prefer}" \
     pg_dump -h "$SRC_HOST" -p "$SRC_PORT" -U "$SRC_USER" -d "$SRC_DB" "$@"
 }
 
 tgt_restore() {
   PGPASSWORD="${TGT_PASSWORD:-${PGPASSWORD:-}}" \
+  PGSSLMODE="${TGT_SSLMODE:-prefer}" \
     pg_restore -h "$TGT_HOST" -p "$TGT_PORT" -U "$TGT_USER" -d "$TGT_DB" "$@"
 }
 
@@ -174,7 +178,7 @@ command_create_subscription() {
   require_tools
   require_env SRC_HOST SRC_PORT SRC_DB SRC_USER SRC_PASSWORD TGT_HOST TGT_PORT TGT_DB TGT_USER SUB_NAME PUB_NAME SLOT_NAME
   local conn
-  conn="host=$(sql_escape_literal "$SRC_HOST") port=$(sql_escape_literal "$SRC_PORT") dbname=$(sql_escape_literal "$SRC_DB") user=$(sql_escape_literal "$SRC_USER") password=$(sql_escape_literal "$SRC_PASSWORD")"
+  conn="host=$(sql_escape_literal "$SRC_HOST") port=$(sql_escape_literal "$SRC_PORT") dbname=$(sql_escape_literal "$SRC_DB") user=$(sql_escape_literal "$SRC_USER") password=$(sql_escape_literal "$SRC_PASSWORD") sslmode=$(sql_escape_literal "${SRC_SSLMODE:-prefer}")"
   tgt_psql <<SQL
 CREATE SUBSCRIPTION "$SUB_NAME"
 CONNECTION '$conn'
